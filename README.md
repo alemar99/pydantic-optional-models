@@ -11,7 +11,11 @@ Then run:
 ./generate_partial_models.py
 ```
 
-You can also pass the `--check` flag to check if it's needed to execute the script again (useful in the CI for example)
+## Key Features
+- Supports both **Pydantic v1** and **Pydantic v2**
+- **Automatically generates** partial models from existing ones
+- **Detects changes** in model name, field names, or types to determine whether regeneration is needed (run with `--check`)
+- Use a simple `@generate_partial` decorator to flag models for generation
+- Add **custom methods** to the generated models without worrying about overwrites
+- Includes a base class for partial models where you can define shared logic or behavior (see the `safe_get` method)
 
-
-Supports both Pydantic v1 and Pydantic v2.
