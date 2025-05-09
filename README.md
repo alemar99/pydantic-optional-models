@@ -14,4 +14,4 @@ Then run:
 You can also pass the `--check` flag to check if it's needed to execute the script again (useful in the CI for example)
 
 
-Currently it only works for pydantic v1. Support for pydantic v2 will be added soon.
+Supports both Pydantic v1 and Pydantic v2.

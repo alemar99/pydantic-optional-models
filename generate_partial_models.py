@@ -19,7 +19,7 @@ import inspect
 from types import FunctionType, ModuleType
 from typing import Self, TypeVar, Union, get_args, get_origin
 
-from pydantic.fields import ModelField
+from pydantic import __version__ as pydantic_version
 
 
 MODELS_PATH = "src/models"
@@ -49,15 +49,14 @@ class {model_name}(BasePartial):
 
 """
 
-MODELS_BASE = "models"
 sys.path.insert(0, "./src")
 try:
-    base = importlib.import_module(MODELS_BASE)
+    base = importlib.import_module(MODELS_MODULE)
     Unset = vars(base)["Unset"]
     UNSET = vars(base)["UNSET"]
     BasePartial = vars(base)["BasePartial"]
 except KeyError as e:
-    print(f"{e} not found in {MODELS_BASE}")
+    print(f"{e} not found in {MODELS_MODULE}")
     sys.exit(1)
 
 
@@ -68,25 +67,29 @@ def default_imports() -> set:
     imports.add(f"from {MODELS_MODULE} import BasePartial, UNSET, Unset")
     return imports
 
+
 def process_string(s) -> str:
-    """Preprocess the `annotation` or `type_` field of a ModelField.
+    """Preprocess the `annotation` of a Pydantic field.
 
     This function:
         - removes all the not wanted chars in e.g. <class 'x'> and <enum 'x'>
         - translates `NoneType` to `None`
         - removes all modules' prefixes
     """
-    s = (
-        str(s)
-        .removeprefix("<class '")
-        .removeprefix("<enum '")
-        .removesuffix("'>")
-    )
+    s = str(s).removeprefix("<class '").removeprefix("<enum '").removesuffix("'>")
     # while dealing with pydantic modelfield, sometimes None is expressed as NoneType
     s = s.replace("NoneType", "None")
     # remove all module prefixes
     s = re.sub(r"\w*\.", "", s)
     return s
+
+
+def add_imports(module_name: str, field: str, imports: set):
+    if module_name not in ["builtins", "types"]:
+        if len(module_name.split(".")) >= 1:
+            imports.add(f"from {module_name} import {field}")
+        else:
+            imports.add(f"import {module_name}")
 
 
 def get_module_name_for_type(type_) -> str:
@@ -98,15 +101,7 @@ def get_module_name_for_type(type_) -> str:
     return module.__name__
 
 
-def add_imports(module_name: str, field: str, imports: set):
-    if module_name not in ["builtins", "types"]:
-        if len(module_name.split(".")) >= 1:
-            imports.add(f"from {module_name} import {field}")
-        else:
-            imports.add(f"import {module_name}")
-
-
-def handle_composite_type(type_, imports: set):
+def _handle_composite_type(type_, imports: set):
     outer = get_origin(type_)
     module_name = get_module_name_for_type(outer)
     add_imports(module_name, process_string(outer), imports)
@@ -114,41 +109,104 @@ def handle_composite_type(type_, imports: set):
     inner = get_args(type_)
     for inner_type in inner:
         if get_origin(inner_type) is not None:
-            handle_composite_type(inner_type, imports)
+            _handle_composite_type(inner_type, imports)
         else:
-            handle_simple_type(inner_type, imports)
+            _handle_simple_type(inner_type, imports)
 
 
-def handle_simple_type(type_, imports: set):
+def _handle_simple_type(type_, imports: set):
     module_name = get_module_name_for_type(type_)
     add_imports(module_name, process_string(type_), imports)
 
 
-def process_field(field: ModelField, imports: set) -> ModelField:
-    """Modifies the field and updates the import statements.
-
-    Updates the type_ and annotation of the field, making it a Union of the
-    already present value and Unset.
-    It also set the required attribute to False and updated the model_config
-    with the config of ResourcePartial (in order to allow for arbitrary types).
-    """
-    if get_origin(field.annotation) is not None:
-        handle_composite_type(field.annotation, imports)
+def handle_annotation_imports(annotation, imports: set):
+    """Adds the necessary imports for types in `annotation`."""
+    if get_origin(annotation) is not None:
+        _handle_composite_type(annotation, imports)
     else:
-        handle_simple_type(field.annotation, imports)
+        _handle_simple_type(annotation, imports)
 
-    field.type_ = Union[field.type_, Unset]
-    field.annotation = Union[field.annotation, Unset]
-    field.default = UNSET
-    field.required = False
-    field.model_config = BasePartial.__config__
-    return field
+
+if int(pydantic_version[0]) == 2:
+    from pydantic.fields import FieldInfo
+
+    @dataclasses.dataclass
+    class FieldInfoWithName:
+        name: str
+        info: FieldInfo
+
+        def __getattr__(self, field):
+            return getattr(self.info, field)
+
+    def process_field_pydantic_v2(field: FieldInfoWithName, imports: set):
+        """Modifies the Pydantic v2 field and updates the import statements.
+
+        Updates the annotation of the field, making it a Union of the
+        already present value and Unset.
+        In pydantic v2 there's no attribute "required", it will be calculated
+        based on the fact that a field has a default value or not.
+        """
+        field_info = field.info
+
+        handle_annotation_imports(field_info.annotation, imports)
+
+        field_info.annotation = Union[field_info.annotation, Unset]
+        field_info.default = UNSET
+        field.info = field_info
+        return field
+
+    def get_fields_from_class_pydantic_v2(class_) -> list:
+        return [
+            FieldInfoWithName(name=n, info=f)
+            for n, f in class_.__pydantic_fields__.items()
+        ]
+
+    def write_field_line_pydantic_v2(field) -> str:
+        return f"    {field.name}: {process_string(str(field.annotation))} = Field(default=UNSET)\n"
+
+    process_field = process_field_pydantic_v2
+
+    get_fields_from_class = get_fields_from_class_pydantic_v2
+
+    write_field_line = write_field_line_pydantic_v2
+
+
+else:
+    from pydantic.fields import ModelField
+
+    def process_field_pydantic_v1(field: ModelField, imports: set):
+        """Modifies the Pydantic v1 field and updates the import statements.
+
+        Updates the type_ and annotation of the field, making it a Union of the
+        already present value and Unset.
+        It also set the required attribute to False and updated the model_config
+        with the config of BasePartial.
+        """
+        handle_annotation_imports(field.annotation, imports)
+
+        field.type_ = Union[field.type_, Unset]
+        field.annotation = Union[field.annotation, Unset]
+        field.default = UNSET
+        field.model_config = BasePartial.__config__
+        return field
+
+    def get_fields_from_class_pydantic_v1(class_) -> list:
+        return list(class_.__fields__.values())
+
+    def write_field_line_pydantic_v1(field) -> str:
+        return f"    {field.name}: {process_string(str(field.annotation))} = Field(default=UNSET, required=False)\n"
+
+    process_field = process_field_pydantic_v1
+
+    get_fields_from_class = get_fields_from_class_pydantic_v1
+
+    write_field_line = write_field_line_pydantic_v1
 
 
 @dataclasses.dataclass(kw_only=True)
 class GenericModel(ABC):
     name: str
-    fields: list[ModelField]
+    fields: list
     model_imports: set = dataclasses.field(default_factory=default_imports)
 
 
@@ -196,14 +254,12 @@ class GenericCollection[M](ABC):
 
 @dataclasses.dataclass(kw_only=True)
 class PartialModel(GenericModel):
-    methods: list[tuple[str, FunctionType]] = dataclasses.field(
-        default_factory=list
-    )
+    methods: list[tuple[str, FunctionType]] = dataclasses.field(default_factory=list)
 
     def to_file(self) -> str:
         field_lines = ""
         for field in sorted(self.fields, key=lambda f: f.name):
-            field_lines += f"    {field.name}: {process_string(str(field.annotation))} = Field(default=UNSET, required=False)\n"
+            field_lines += write_field_line(field)
         method_lines = ""
         for method_name, method_obj in self.methods:
             if method_name.startswith("__"):
@@ -221,6 +277,8 @@ class PartialModel(GenericModel):
     def __eq__(self, other) -> bool:
         """Compare the fields to check if the two model differs."""
         if isinstance(other, PartialModel):
+            if self.name != other.name:
+                return False
             fields_self = sorted(self.fields, key=lambda m: m.name)
             fields_other = sorted(other.fields, key=lambda m: m.name)
             if len(fields_self) != len(fields_other):
@@ -252,7 +310,7 @@ class PartialModule(GenericModule[PartialModel]):
                 models.append(
                     PartialModel(
                         name=name,
-                        fields=list(class_.__fields__.values()),
+                        fields=get_fields_from_class(class_),
                         methods=partial_methods,
                     )
                 )
@@ -332,9 +390,7 @@ class DomainModule(GenericModule[DomainModel]):
         )
         models = []
         for name, class_ in model_classes:
-            models.append(
-                DomainModel(name=name, fields=list(class_.__fields__.values()))
-            )
+            models.append(DomainModel(name=name, fields=get_fields_from_class(class_)))
 
         return cls(filename=filename, models=models)
 
@@ -387,9 +443,7 @@ def main():
     for domain_module in domain_collection:
         generated_partial_module = domain_module.to_partial_module()
         filename = generated_partial_module.filename
-        existing_partial_module = partial_collection.pop_module_with_filename(
-            filename
-        )
+        existing_partial_module = partial_collection.pop_module_with_filename(filename)
 
         if existing_partial_module is None:
             to_write[filename] = generated_partial_module.to_file()
@@ -406,9 +460,7 @@ def main():
     if args.check:
         if to_write or to_delete:
             if to_write:
-                print(
-                    f"Partial models {list(to_write.keys())} must be re-generated."
-                )
+                print(f"Partial models {list(to_write.keys())} must be re-generated.")
             if to_delete:
                 print(f"Partial models {to_delete} must be deleted.")
             print("Run `./generate_partial_models.py`.")
@@ -422,4 +474,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

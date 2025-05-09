@@ -1,9 +1,9 @@
 [project]
-name = "Automatic generation of Pydantic models with all the fields set to optional."
+name = "code-generate-pydantic-optional-models"
 version = "0.1.0"
 description = ""
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pydantic==1.10",
+    "pydantic>=2.11.4",
 ]
